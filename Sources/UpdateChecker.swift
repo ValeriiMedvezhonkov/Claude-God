@@ -47,9 +47,25 @@ class UpdateChecker: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    /// Numeric release components, ignoring any `-suffix` or `+suffix`.
+    ///
+    /// `compactMap` alone is not enough: it *drops* unparseable components
+    /// rather than stopping at them, so "2.25.5-rc1" collapses to [2, 25] and
+    /// every later component shifts left into the wrong position — which makes
+    /// the comparison claim an older release is newer.
+    static func releaseComponents(_ version: String) -> [Int] {
+        let core = version.prefix { $0 != "-" && $0 != "+" }
+        return core.split(separator: ".").compactMap { Int($0) }
+    }
+
+    /// Whether `remote` supersedes `current`.
+    ///
+    /// A suffixed `current` ("2.25.5-multiacct.1") is a build derived *from*
+    /// that release, so an identical upstream release is not an update — it is
+    /// a downgrade that would silently overwrite the local build.
     static func isNewer(remote: String, current: String) -> Bool {
-        let r = remote.split(separator: ".").compactMap { Int($0) }
-        let c = current.split(separator: ".").compactMap { Int($0) }
+        let r = releaseComponents(remote)
+        let c = releaseComponents(current)
         for i in 0..<max(r.count, c.count) {
             let rv = i < r.count ? r[i] : 0
             let cv = i < c.count ? c[i] : 0
