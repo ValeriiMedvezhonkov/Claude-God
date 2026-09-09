@@ -698,30 +698,12 @@ struct MenuBarView: View {
                             .foregroundColor(.secondary)
                     } else {
                         ForEach(Array(manager.accounts.enumerated()), id: \.element.id) { index, account in
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(index == manager.activeAccountIndex ? Color.green : Theme.border)
-                                    .frame(width: 6, height: 6)
-                                Text(account.label)
-                                    .shFont(11, weight: index == manager.activeAccountIndex ? .semibold : .regular)
-                                Text(account.configDir == nil ? "default" : "profile")
-                                    .shFont(9)
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                                if index != manager.activeAccountIndex {
-                                    SHButton(label: "Switch", style: .ghost) {
-                                        manager.switchAccount(index: index)
-                                    }
-                                }
-                                Button {
-                                    manager.removeAccount(at: index)
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .shFont(11, weight: .bold)
-                                        .foregroundColor(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
+                            AccountRow(
+                                account: account,
+                                isViewing: index == manager.activeAccountIndex,
+                                onSwitch: { manager.switchAccount(index: index) },
+                                onRemove: { manager.removeAccount(at: index) }
+                            )
                         }
                     }
                 }
@@ -4391,6 +4373,81 @@ struct WindowTopAnchor: NSViewRepresentable {
                 display: false,
                 animate: false
             )
+        }
+    }
+}
+
+// MARK: - Account row
+
+/// One row in the Accounts card.
+///
+/// The old row showed a label and the word "default" or "profile" — both derived
+/// from a path stored when the account was added. Neither survives a profile
+/// manager rotating accounts through `~/.claude`, and when they went stale the
+/// row went on confidently reporting another account's usage. So the row now
+/// shows what it resolved: the email actually signed in there, whether it holds
+/// the system slot, and a warning when the label and the email disagree.
+private struct AccountRow: View {
+    let account: AccountInfo
+    /// This is the account the app is displaying — distinct from owning the
+    /// system login, which is what `ownsSystemSlot` reports.
+    let isViewing: Bool
+    let onSwitch: () -> Void
+    let onRemove: () -> Void
+
+    private var email: String? { account.resolvedEmail }
+
+    /// The label promises one account and the config dir holds another. Almost
+    /// always a row that went stale after a switch — the exact failure that used
+    /// to be invisible.
+    private var isMismatched: Bool {
+        guard let email, let local = email.split(separator: "@").first else { return false }
+        return String(local).caseInsensitiveCompare(account.label) != .orderedSame
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(isViewing ? Color.green : Theme.border)
+                    .frame(width: 6, height: 6)
+                Text(account.label)
+                    .shFont(11, weight: isViewing ? .semibold : .regular)
+                Text(account.ownsSystemSlot ? "system" : "profile")
+                    .shFont(9)
+                    .foregroundColor(account.ownsSystemSlot ? Theme.accent : .secondary)
+                Spacer()
+                if !isViewing {
+                    SHButton(label: "Switch", style: .ghost, action: onSwitch)
+                }
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .shFont(11, weight: .bold)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack(spacing: 4) {
+                if let email {
+                    if isMismatched {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .shFont(9)
+                            .foregroundColor(.orange)
+                    }
+                    Text(email)
+                        .shFont(9)
+                        .foregroundColor(isMismatched ? .orange : .secondary)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .shFont(9)
+                        .foregroundColor(.orange)
+                    Text("no login found at this location")
+                        .shFont(9)
+                        .foregroundColor(.orange)
+                }
+            }
+            .padding(.leading, 12)
         }
     }
 }

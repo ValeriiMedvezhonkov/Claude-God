@@ -121,6 +121,19 @@ struct AccountInfo: Identifiable, Codable {
     /// CLAUDE_CONFIG_DIR of this account; nil = the default ~/.claude login.
     /// Optional so account lists saved by earlier versions still decode.
     var configDir: String? = nil
+
+    /// Where this account's data lives. A stored path is only a *claim* about
+    /// location, so every consumer goes through this rather than reading
+    /// `configDir` directly.
+    var resolvedConfigDir: String? { configDir }
+
+    /// The email actually signed in where this row points, or nil if none is.
+    /// This is the ground truth a row's label gets checked against.
+    var resolvedEmail: String? { ClaudeIdentity.email(for: resolvedConfigDir) }
+
+    /// True when this row occupies `~/.claude` — the login that every tool
+    /// knowing nothing about CLAUDE_CONFIG_DIR will see.
+    var ownsSystemSlot: Bool { resolvedConfigDir == nil }
 }
 
 // MARK: - Seuils de couleur partagés
@@ -2020,7 +2033,9 @@ class UsageManager: ObservableObject {
     private func applyActiveAccountContext() {
         let account = (activeAccountIndex >= 0 && activeAccountIndex < accounts.count)
             ? accounts[activeAccountIndex] : nil
-        ActiveAccount.configDir = account?.configDir
+        // Resolved, not stored: the directory a row was registered with is a
+        // claim about where its account lives, not a guarantee.
+        ActiveAccount.configDir = account?.resolvedConfigDir
         auth.startWatchingCredentials()
     }
 
