@@ -2094,12 +2094,18 @@ class UsageManager: ObservableObject {
                 // Don't clear quotas — keep old data until new ones arrive
                 self.refresh()
             } else {
-                self.errorMessage = "No credentials for this account — run `claude auth login` with its CLAUDE_CONFIG_DIR"
+                self.errorMessage = self.missingCredentialsMessage()
             }
         }
         // Transcripts are read straight off disk, so these need no credentials.
         forceRefreshStats()
         refreshTimeline()
+    }
+
+    /// Why the active account has no usable token, phrased so the suggested fix
+    /// is one that will actually work.
+    private func missingCredentialsMessage() -> String {
+        "No credentials for this account — run `claude auth login` with its CLAUDE_CONFIG_DIR"
     }
 
     func switchAccount(index: Int) {

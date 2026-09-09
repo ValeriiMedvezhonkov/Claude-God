@@ -705,6 +705,13 @@ struct MenuBarView: View {
                                 onRemove: { manager.removeAccount(at: index) }
                             )
                         }
+                        // Switching re-points what this app reads; it does not
+                        // hand over the system login. Saying so prevents the
+                        // reading the old UI invited — that the green dot means
+                        // "this is the account my terminal uses".
+                        Text("Switching changes what this app monitors, not your system login.")
+                            .shFont(9)
+                            .foregroundColor(.secondary)
                     }
                 }
             }
