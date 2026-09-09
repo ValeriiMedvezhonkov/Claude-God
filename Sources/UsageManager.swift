@@ -988,6 +988,10 @@ class UsageManager: ObservableObject {
         auth.loadCredentials()
         auth.startWatchingCredentials()
 
+        // Deferred off the init path: registration talks to a system service and
+        // has no business blocking startup.
+        DispatchQueue.main.async { [weak self] in self?.reassertLoginItem() }
+
         // Auto-connect when credentials appear via file watcher
         auth.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async {
@@ -2268,6 +2272,28 @@ class UsageManager: ObservableObject {
             }
         } catch {
             Log.error("Failed to update launch at login: \(error.localizedDescription)")
+        }
+    }
+
+    /// Re-point the login item at wherever this bundle now lives.
+    ///
+    /// The registration records an absolute path, and it was only ever written
+    /// when the toggle changed. Move the app — install it somewhere else, run a
+    /// build from a different directory — and the stored path still names the
+    /// old location, so login launches a copy the user has stopped using, or
+    /// nothing at all once that copy is gone.
+    ///
+    /// Re-registering cannot update the path on its own: an already-enabled
+    /// service treats it as a no-op. Dropping the stale entry first is what
+    /// makes the new path take effect.
+    private func reassertLoginItem() {
+        guard launchAtLogin else { return }
+        try? SMAppService.mainApp.unregister()
+        do {
+            try SMAppService.mainApp.register()
+            Log.info("Login item re-pointed at \(Bundle.main.bundleURL.path)")
+        } catch {
+            Log.error("Failed to re-point launch at login: \(error.localizedDescription)")
         }
     }
 
