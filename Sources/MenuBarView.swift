@@ -678,6 +678,11 @@ struct MenuBarView: View {
                     HStack {
                         SHLabel("Accounts")
                         Spacer()
+                        if Ccacct.isInstalled {
+                            SHButton(label: "Import", icon: "square.and.arrow.down", style: .ghost) {
+                                manager.importCcacctAccounts()
+                            }
+                        }
                         SHButton(label: "Add", icon: "plus", style: .ghost) {
                             let panel = NSOpenPanel()
                             panel.canChooseFiles = false
@@ -4420,9 +4425,15 @@ private struct AccountRow: View {
                     .frame(width: 6, height: 6)
                 Text(account.label)
                     .shFont(11, weight: isViewing ? .semibold : .regular)
-                Text(account.ownsSystemSlot ? "system" : "profile")
-                    .shFont(9)
-                    .foregroundColor(account.ownsSystemSlot ? Theme.accent : .secondary)
+                if account.ownsSystemSlot {
+                    Text("system")
+                        .shFont(9)
+                        .foregroundColor(Theme.accent)
+                } else {
+                    Text(account.isManaged ? "parked" : "profile")
+                        .shFont(9)
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
                 if !isViewing {
                     SHButton(label: "Switch", style: .ghost, action: onSwitch)

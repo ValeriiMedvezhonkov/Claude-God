@@ -118,21 +118,38 @@ struct AccountInfo: Identifiable, Codable {
     var id = UUID()
     var label: String       // e.g. "Work", "Personal"
     var credentialsPath: String
-    /// CLAUDE_CONFIG_DIR of this account; nil = the default ~/.claude login.
+    /// Statically pinned CLAUDE_CONFIG_DIR; nil = the default ~/.claude login.
     /// Optional so account lists saved by earlier versions still decode.
+    ///
+    /// Only consulted for rows that are *not* ccacct-managed — see
+    /// `resolvedConfigDir`, which is what every consumer should use.
     var configDir: String? = nil
+    /// Name of the ccacct account this row tracks, when it is managed by ccacct.
+    /// Optional with a nil default so lists saved by earlier versions decode.
+    var ccacctName: String? = nil
 
-    /// Where this account's data lives. A stored path is only a *claim* about
-    /// location, so every consumer goes through this rather than reading
-    /// `configDir` directly.
-    var resolvedConfigDir: String? { configDir }
+    /// Where this account's data lives *right now*.
+    ///
+    /// A ccacct account moves: while it owns the native slot its data is in
+    /// `~/.claude` (config dir nil, bare Keychain service), and once another
+    /// account is activated it is parked back into its profile directory. A
+    /// stored path cannot express that, so managed rows resolve on every read.
+    var resolvedConfigDir: String? {
+        guard let ccacctName, Ccacct.isKnown(ccacctName) else { return configDir }
+        return Ccacct.resolvedConfigDir(for: ccacctName)
+    }
+
+    /// True when this row follows a ccacct account rather than a fixed path.
+    var isManaged: Bool {
+        guard let ccacctName else { return false }
+        return Ccacct.isKnown(ccacctName)
+    }
 
     /// The email actually signed in where this row points, or nil if none is.
-    /// This is the ground truth a row's label gets checked against.
     var resolvedEmail: String? { ClaudeIdentity.email(for: resolvedConfigDir) }
 
-    /// True when this row occupies `~/.claude` — the login that every tool
-    /// knowing nothing about CLAUDE_CONFIG_DIR will see.
+    /// True when this row currently occupies `~/.claude`, i.e. it is the login
+    /// every tool that knows nothing about ccacct will see.
     var ownsSystemSlot: Bool { resolvedConfigDir == nil }
 }
 
@@ -962,6 +979,9 @@ class UsageManager: ObservableObject {
             self?.objectWillChange.send()
         }.store(in: &cancellables)
 
+        // Repair stale label→path rows before anything reads them, so the
+        // context applied below is the resolved location and not last week's.
+        migrateAccountsToCcacct()
         // The account context must be in place before the first credential load,
         // or startup would briefly adopt the default account's token.
         applyActiveAccountContext()
@@ -1446,6 +1466,10 @@ class UsageManager: ObservableObject {
 
     /// Refresh if data is older than 2 minutes (called on popover appear)
     func refreshIfStale() {
+        // Checked before the staleness guard: an account swap makes even
+        // seconds-old data belong to the wrong account, and the reload it
+        // triggers refreshes anyway.
+        syncActiveAccountLocation()
         let staleThreshold: TimeInterval = 120
         if let last = lastRefresh, Date().timeIntervalSince(last) < staleThreshold { return }
         Log.info("Data stale (>2min) — auto-refreshing on popover open")
@@ -1454,6 +1478,9 @@ class UsageManager: ObservableObject {
 
     /// Auto-refresh — respects rate limit cooldown
     func autoRefresh() {
+        // Keeps the menu bar honest between popover opens: a `ccacct use` in a
+        // terminal must not leave the ring showing the previous account's quota.
+        syncActiveAccountLocation()
         if let until = rateLimitedUntil, Date() < until {
             let remaining = Int(until.timeIntervalSince(Date()))
             if remaining > 0 {
@@ -2033,10 +2060,71 @@ class UsageManager: ObservableObject {
     private func applyActiveAccountContext() {
         let account = (activeAccountIndex >= 0 && activeAccountIndex < accounts.count)
             ? accounts[activeAccountIndex] : nil
-        // Resolved, not stored: the directory a row was registered with is a
-        // claim about where its account lives, not a guarantee.
+        // Resolved, not stored: a managed account that has since been activated
+        // or parked by ccacct lives somewhere else than when it was registered.
         ActiveAccount.configDir = account?.resolvedConfigDir
         auth.startWatchingCredentials()
+    }
+
+    /// Re-point the app when ccacct moved the active account out from under it.
+    ///
+    /// Without this, a global `ccacct use` performed in a terminal leaves the
+    /// app reading `~/.claude` for a row that no longer lives there — which is
+    /// precisely how one account ends up displaying another's quota.
+    func syncActiveAccountLocation() {
+        Ccacct.invalidate()
+        guard activeAccountIndex >= 0 && activeAccountIndex < accounts.count else { return }
+        let resolved = accounts[activeAccountIndex].resolvedConfigDir
+        guard ActiveAccount.configDir != resolved else { return }
+        Log.info("Account location changed — re-pointing at \(resolved ?? "~/.claude")")
+        reloadForActiveAccount()
+    }
+
+    /// Adopt ccacct as the source of truth for rows that name a known account.
+    ///
+    /// Runs once at startup. Earlier versions stored whatever path was picked in
+    /// the folder panel, which goes stale on the first global switch; matching
+    /// on label repairs those rows in place instead of making the user delete
+    /// and re-add every account.
+    private func migrateAccountsToCcacct() {
+        guard Ccacct.isInstalled, !accounts.isEmpty else { return }
+        var changed = false
+        for index in accounts.indices where accounts[index].ccacctName == nil {
+            // Match the row's own label first, then the profile directory it was
+            // pinned to — a row added via the folder panel is labelled after the
+            // directory (e.g. "p-af560cea"), which is not the account name.
+            let byLabel = Ccacct.account(named: accounts[index].label)
+            let byDir = accounts[index].configDir.flatMap { dir in
+                Ccacct.accounts.first { $0.profileDir == dir }
+            }
+            guard let match = byLabel ?? byDir else { continue }
+            accounts[index].ccacctName = match.name
+            accounts[index].label = match.name
+            // Keep a coherent static fallback for the case where ccacct is later
+            // removed: the profile directory, never the rotating native slot.
+            accounts[index].configDir = match.profileDir
+            changed = true
+            Log.info("Account row '\(match.name)' is now tracked by ccacct")
+        }
+        if changed { applyActiveAccountContext() }
+    }
+
+    /// Register every ccacct account that has no row yet.
+    func importCcacctAccounts() {
+        guard Ccacct.isInstalled else { return }
+        var changed = false
+        for account in Ccacct.accounts where !accounts.contains(where: { $0.ccacctName == account.name }) {
+            accounts.append(AccountInfo(
+                label: account.name,
+                // Managed rows resolve their own location; these two fields are
+                // only the fallback for a future where ccacct is uninstalled.
+                credentialsPath: account.profileDir.map { $0 + "/.credentials.json" } ?? "",
+                configDir: account.profileDir,
+                ccacctName: account.name
+            ))
+            changed = true
+        }
+        if changed { applyActiveAccountContext() }
     }
 
     /// `~/.claude` — where Claude Code stores the login used when
@@ -2102,10 +2190,21 @@ class UsageManager: ObservableObject {
         refreshTimeline()
     }
 
-    /// Why the active account has no usable token, phrased so the suggested fix
-    /// is one that will actually work.
+    /// Why this account has no usable token, phrased so the suggested fix is the
+    /// one that will actually work.
+    ///
+    /// Telling a parked ccacct account to `claude auth login` is wrong advice —
+    /// it *is* signed in, its token just moved into the native Keychain service
+    /// when some other account was activated. Only a genuinely logged-out
+    /// account needs a login.
     private func missingCredentialsMessage() -> String {
-        "No credentials for this account — run `claude auth login` with its CLAUDE_CONFIG_DIR"
+        let account = (activeAccountIndex >= 0 && activeAccountIndex < accounts.count)
+            ? accounts[activeAccountIndex] : nil
+        let generic = "No credentials for this account — run `claude auth login` with its CLAUDE_CONFIG_DIR"
+        guard let account, account.isManaged, let owner = Ccacct.nativeOwner else { return generic }
+        if owner == account.ccacctName { return generic }
+        return "\(account.label) is parked — \(owner) currently holds the system login. "
+            + "Run `ccacct use \(account.label)` in a terminal to hand the slot over."
     }
 
     func switchAccount(index: Int) {
